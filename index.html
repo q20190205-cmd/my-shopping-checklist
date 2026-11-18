@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的購物清單</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f4eb;color:#25362c;font:16px system-ui,sans-serif}main{width:min(100% - 32px,630px);margin:28px auto 48px}header{padding:28px;border-radius:25px;background:#224638;color:#fff8df}header small{color:#dcf090}h1{font-size:clamp(29px,7vw,46px);margin:6px 0 0}button,input{font:inherit}button{cursor:pointer;min-height:44px;border:0;border-radius:12px;background:#e6eddf;color:#224638;padding:8px 12px;font-weight:650}button[aria-pressed=true],.primary{background:#224638;color:white}.panel{background:#fffdf7;border:1px solid #e1e4d8;border-radius:22px;padding:17px;margin:12px 0}.head{display:flex;align-items:center;justify-content:space-between;gap:8px}h2{font-size:22px;margin:0;overflow-wrap:anywhere}p{margin:8px 0;color:#59675c}form{display:grid;gap:9px}input[type=text]{width:100%;min-height:45px;padding:10px 12px;border:1px solid #bac9ba;border-radius:12px;background:white}label{font-weight:650}input[type=file]{display:block;width:100%;margin-top:5px;font-size:14px}input::file-selector-button{padding:9px;border:0;border-radius:8px;background:#e6eddf;color:#224638}.item{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid #e1e4d8}.item label{display:flex;align-items:center;gap:10px;min-height:44px;overflow-wrap:anywhere}.item input{width:22px;height:22px;flex:none;accent-color:#224638}.item img{width:52px;height:52px;object-fit:cover;border-radius:10px}.done{text-decoration:line-through;color:#67756b}.remove{background:transparent;color:#8a4035;font-size:14px}.photo{padding:0;display:grid;place-items:center;background:transparent}dialog{max-width:min(92vw,550px);border:0;border-radius:18px;padding:12px;background:#fffdf7}dialog::backdrop{background:#152019bd}dialog img{display:block;max-width:100%;max-height:72vh;margin-bottom:8px}footer{color:#536255;font-size:13px}
+</style>
+<main><header><small>在超市、市集或出門前</small><h1>我的購物清單</h1></header>
+<section class="panel"><label for="nickname">你的名字</label><input id="nickname" type="text" maxlength="20" placeholder="輸入名字或暱稱" autocomplete="nickname"></section>
+<form class="panel" id="add"><label for="item">要買什麼？</label><input id="item" type="text" maxlength="100" placeholder="例如：無糖豆漿" required><label for="photo">商品照片（選填）<input id="photo" type="file" accept="image/*"></label><button class="primary" id="submit">＋ 加入清單</button></form>
+<section class="panel" aria-label="購物項目"><div class="head"><h2>購物項目</h2><span id="count"></span></div><p id="empty">清單是空的。先加一件想買的東西吧！</p><div id="items"></div></section><p id="status" role="status"></p><footer>名稱、品項與照片會自動保存在目前的瀏覽器。</footer></main>
+<dialog id="viewer"><img alt=""><form method="dialog"><button>關閉照片</button></form></dialog>
+<script>
+const el=id=>document.getElementById(id);
+
+const defaultList={id:0,name:'',items:[]};
+let list=structuredClone(defaultList), previewUrl='';
+const database=new Promise((resolve,reject)=>{
+ const req=indexedDB.open('pocket-shopping',1);
+ req.onupgradeneeded=()=>req.result.createObjectStore('lists',{keyPath:'id'});
+ req.onsuccess=()=>resolve(req.result);
+ req.onerror=()=>reject(req.error);
+});
+function read(db){
+ return new Promise((resolve,reject)=>{
+  const req=db.transaction('lists').objectStore('lists').getAll();
+  req.onsuccess=()=>resolve(req.result);
+  req.onerror=()=>reject(req.error);
+ });
+}
+async function update(change){
+ try{
+  const db=await database;
+  const next=await new Promise((resolve,reject)=>{
+   const tx=db.transaction('lists','readwrite'), store=tx.objectStore('lists'), req=store.get(0);
+   let value;
+   req.onsuccess=()=>{value=req.result||structuredClone(defaultList);change(value);store.put(value);};
+   tx.oncomplete=()=>resolve(value);
+   tx.onabort=()=>reject(tx.error);
+  });
+  list=next;el('status').textContent='已儲存';render();return true;
+ }catch{el('status').textContent='儲存失敗，請確認瀏覽器允許儲存資料，或試試較小的照片。';return false;}
+}
+let urls=[];
+function render(){
+ urls.forEach(URL.revokeObjectURL);urls=[];
+ const {items}=list;
+ el('count').textContent=items.filter(x=>x.done).length+' / '+items.length+' 已買';
+ el('empty').hidden=items.length>0;
+
+ el('items').replaceChildren(...items.map(item=>{
+  const row=document.createElement('div');row.className='item';
+  const photo=document.createElement('span');
+  if(item.photo){
+   const url=URL.createObjectURL(item.photo);urls.push(url);
+   const b=document.createElement('button');b.className='photo';b.setAttribute('aria-label','查看'+item.name+'的照片');
+   const img=new Image();img.alt='';img.src=url;b.append(img);photo.append(b);
+   b.onclick=()=>{previewUrl=URL.createObjectURL(item.photo);const big=el('viewer').querySelector('img');big.src=previewUrl;big.alt=item.name;el('viewer').showModal();};
+  }
+  const label=document.createElement('label');const check=document.createElement('input');check.type='checkbox';check.checked=item.done;
+  const name=document.createElement('span');name.textContent=item.name;if(item.done)name.className='done';
+  check.onchange=async()=>{const done=check.checked;if(!await update(data=>{const target=data.items.find(x=>x.id===item.id);if(target)target.done=done;}))check.checked=!done;};
+  label.append(check,name);
+  const del=document.createElement('button');del.textContent='刪除';del.className='remove';del.setAttribute('aria-label','刪除'+item.name);
+  del.onclick=()=>{if(confirm('刪除「'+item.name+'」？'))update(data=>{data.items=data.items.filter(x=>x.id!==item.id);});};
+  row.append(photo,label,del);return row;
+ }));
+}
+el('viewer').onclose=()=>{URL.revokeObjectURL(previewUrl);el('viewer').querySelector('img').removeAttribute('src');};
+let nameEdited=false;
+el('nickname').oninput=e=>{
+ nameEdited=true;
+ const name=e.target.value.trim();
+ update(data=>{data.name=name;});
+};
+el('add').onsubmit=async e=>{
+ e.preventDefault();
+ const name=el('item').value.trim(),photo=el('photo').files[0],button=el('submit');
+ if(!name)return;
+ button.disabled=true;
+ try{
+  let picture=photo;
+  if(photo){
+   const bitmap=await createImageBitmap(photo);
+   try{
+    const scale=Math.min(1,1200/Math.max(bitmap.width,bitmap.height));
+    const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+    picture=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.85))||photo;
+   }finally{bitmap.close();}
+  }
+  if(await update(list=>{list.items.unshift({id:crypto.randomUUID(),name,photo:picture,done:false});}))e.target.reset();
+ }catch{el('status').textContent='這張照片無法讀取，請試試 JPG 或 PNG。';}
+ finally{button.disabled=false;}
+};
+render();
+database.then(read).then(saved=>{list=saved.find(entry=>entry.id===0)||list;if(!nameEdited)el('nickname').value=list.name==='清單 1'?'':list.name;render();}).catch(()=>{el('status').textContent='瀏覽器目前無法讀取已儲存的清單。';});
+</script></html>
