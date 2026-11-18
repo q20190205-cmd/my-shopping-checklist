@@ -27,7 +27,15 @@ header{position:relative;isolation:isolate;overflow:hidden;padding-bottom:40px}
 <dialog id="viewer"><img alt=""><form method="dialog"><button>關閉照片</button></form></dialog>
 <script>
 const el=id=>document.getElementById(id);
+const fromLine=/\bLine\//i.test(navigator.userAgent);
+if(fromLine)el('install').textContent='在瀏覽器開啟';
 el('install').onclick=()=>{
+ if(fromLine){
+  const url=new URL(location.href);
+  url.searchParams.set('openExternalBrowser','1');
+  location.assign(url.href);
+  return;
+ }
  const apple=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
  const android=/Android/.test(navigator.userAgent);
  const instructions=[
@@ -126,4 +134,5 @@ el('add').onsubmit=async e=>{
 render();
 database.then(read).then(saved=>{list=saved.find(entry=>entry.id===0)||list;if(!nameEdited)el('nickname').value=list.name==='清單 1'?'':list.name;render();}).catch(()=>{el('status').textContent='瀏覽器目前無法讀取已儲存的清單。';});
 </script></html>
+
 
