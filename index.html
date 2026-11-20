@@ -29,7 +29,7 @@ header{position:relative;isolation:isolate;overflow:hidden;padding-bottom:40px}
 <form class="panel" id="add"><label for="item">要買什麼？</label><input id="item" type="text" maxlength="100" placeholder="例如：無糖豆漿" required><label for="photo">商品照片（選填）<input id="photo" type="file" accept="image/*"></label><button class="primary" id="submit">＋ 加入清單</button></form>
 <section class="panel" aria-label="購物項目"><div class="head"><h2>購物項目</h2><span id="count"></span></div><p id="empty">清單是空的。先加一件想買的東西吧！</p><div id="items"></div></section><p id="status" role="status"></p><footer>名稱、品項與照片會自動保存在目前的瀏覽器。</footer></main>
 <dialog id="installHelp" class="install-steps"><h2>加到手機主畫面</h2><div id="installSteps"></div><form method="dialog"><button>關閉</button></form></dialog>
-<dialog id="viewer"><img alt=""><form method="dialog"><button>關閉照片</button></form></dialog>
+<dialog id="viewer"><img alt=""><p id="photoStatus" role="status"></p><label for="replacePhoto">更換這個品項的照片<input id="replacePhoto" type="file" accept="image/*"></label><form method="dialog"><button>關閉照片</button></form></dialog>
 <script>
 const el=id=>document.getElementById(id);
 const fromLine=/\bLine\//i.test(navigator.userAgent);
@@ -57,7 +57,41 @@ el('install').onclick=()=>{
 };
 
 const defaultList={id:0,name:'',items:[]};
-let list=structuredClone(defaultList), previewUrl='';
+let list=structuredClone(defaultList), viewingId=null, viewerRequest=0, adding=false;
+const photoSources=new WeakMap();
+function readPhoto(photo){
+ if(typeof photo==='string')return Promise.resolve(photo);
+ if(!photoSources.has(photo))photoSources.set(photo,new Promise((resolve,reject)=>{
+  const reader=new FileReader();
+  reader.onload=()=>resolve(reader.result);
+  reader.onerror=()=>reject(reader.error);
+  reader.readAsDataURL(photo);
+ }));
+ return photoSources.get(photo);
+}
+async function preparePhoto(file){
+ const source=await readPhoto(file);
+ const image=new Image();
+ await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=reject;image.src=source;});
+ const scale=Math.min(1,1200/Math.max(image.naturalWidth,image.naturalHeight));
+ const canvas=document.createElement('canvas');
+ canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));
+ canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
+ const context=canvas.getContext('2d');
+ context.fillStyle='#ffffff';context.fillRect(0,0,canvas.width,canvas.height);
+ context.drawImage(image,0,0,canvas.width,canvas.height);
+ return canvas.toDataURL('image/jpeg',.85);
+}
+async function showPhoto(id){
+ const item=list.items.find(x=>x.id===id);
+ if(!item?.photo)return;
+ const request=++viewerRequest;
+ viewingId=id;el('replacePhoto').value='';el('photoStatus').textContent='';
+ const big=el('viewer').querySelector('img');big.removeAttribute('src');big.alt=item.name;
+ el('viewer').showModal();
+ try{const source=await readPhoto(item.photo);if(request===viewerRequest&&el('viewer').open)big.src=source;}
+ catch{if(request===viewerRequest)el('photoStatus').textContent='照片無法讀取，請重新選擇。';}
+}
 const database=new Promise((resolve,reject)=>{
  const req=indexedDB.open('pocket-shopping',1);
  req.onupgradeneeded=()=>req.result.createObjectStore('lists',{keyPath:'id'});
@@ -84,9 +118,7 @@ async function update(change){
   list=next;el('status').textContent='已儲存';render();return true;
  }catch{el('status').textContent='儲存失敗，請確認瀏覽器允許儲存資料，或試試較小的照片。';return false;}
 }
-let urls=[];
 function render(){
- urls.forEach(URL.revokeObjectURL);urls=[];
  const {items}=list;
  el('count').textContent=items.filter(x=>x.done).length+' / '+items.length+' 已買';
  el('empty').hidden=items.length>0;
@@ -95,10 +127,10 @@ function render(){
   const row=document.createElement('div');row.className='item';
   const photo=document.createElement('span');
   if(item.photo){
-   const url=URL.createObjectURL(item.photo);urls.push(url);
    const b=document.createElement('button');b.className='photo';b.setAttribute('aria-label','查看'+item.name+'的照片');
-   const img=new Image();img.alt='';img.src=url;b.append(img);photo.append(b);
-   b.onclick=()=>{previewUrl=URL.createObjectURL(item.photo);const big=el('viewer').querySelector('img');big.src=previewUrl;big.alt=item.name;el('viewer').showModal();};
+   const img=new Image();img.alt=item.name;img.width=52;img.height=52;b.append(img);photo.append(b);
+   readPhoto(item.photo).then(source=>{img.src=source;}).catch(()=>{img.alt='重新選擇照片';});
+   b.onclick=()=>showPhoto(item.id);
   }
   const label=document.createElement('label');const check=document.createElement('input');check.type='checkbox';check.checked=item.done;
   const name=document.createElement('span');name.textContent=item.name;if(item.done)name.className='done';
@@ -109,7 +141,21 @@ function render(){
   row.append(photo,label,del);return row;
  }));
 }
-el('viewer').onclose=()=>{URL.revokeObjectURL(previewUrl);el('viewer').querySelector('img').removeAttribute('src');};
+el('viewer').onclose=()=>{++viewerRequest;viewingId=null;el('viewer').querySelector('img').removeAttribute('src');};
+el('replacePhoto').onchange=async e=>{
+ const input=e.target,file=input.files[0],id=viewingId;
+ if(!file||!id)return;
+ const request=viewerRequest;input.disabled=true;el('photoStatus').textContent='正在儲存照片…';
+ try{
+  const picture=await preparePhoto(file);
+  const saved=await update(data=>{const item=data.items.find(x=>x.id===id);if(item)item.photo=picture;});
+  if(request===viewerRequest){
+   el('photoStatus').textContent=saved?'照片已更新':'儲存失敗，請再試一次。';
+   if(saved)el('viewer').querySelector('img').src=picture;
+  }
+ }catch{if(request===viewerRequest)el('photoStatus').textContent='這張照片無法讀取，請試試 JPG 或 PNG。';}
+ finally{input.disabled=false;input.value='';}
+};
 let nameEdited=false;
 el('nickname').oninput=e=>{
  nameEdited=true;
@@ -118,27 +164,20 @@ el('nickname').oninput=e=>{
 };
 el('add').onsubmit=async e=>{
  e.preventDefault();
+ if(adding)return;
  const name=el('item').value.trim(),photo=el('photo').files[0],button=el('submit');
  if(!name)return;
- button.disabled=true;
+ adding=true;button.disabled=true;
  try{
-  let picture=photo;
-  if(photo){
-   const bitmap=await createImageBitmap(photo);
-   try{
-    const scale=Math.min(1,1200/Math.max(bitmap.width,bitmap.height));
-    const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
-    picture=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.85))||photo;
-   }finally{bitmap.close();}
-  }
+  const picture=photo?await preparePhoto(photo):null;
   if(await update(list=>{list.items.unshift({id:crypto.randomUUID(),name,photo:picture,done:false});}))e.target.reset();
  }catch{el('status').textContent='這張照片無法讀取，請試試 JPG 或 PNG。';}
- finally{button.disabled=false;}
+ finally{adding=false;button.disabled=false;}
 };
 render();
 database.then(read).then(saved=>{list=saved.find(entry=>entry.id===0)||list;if(!nameEdited)el('nickname').value=list.name==='清單 1'?'':list.name;render();}).catch(()=>{el('status').textContent='瀏覽器目前無法讀取已儲存的清單。';});
 </script></html>
+
 
 
 
