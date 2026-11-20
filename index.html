@@ -58,6 +58,14 @@ el('install').onclick=()=>{
 
 const defaultList={id:0,name:'',items:[]};
 let list=structuredClone(defaultList), viewingId=null, viewerRequest=0, adding=false;
+let ready=false, pendingWrites=0, photoJobs=0, refreshRequest=0;
+let writeQueue=Promise.resolve();
+function syncControls(){
+ const busy=!ready||pendingWrites>0||photoJobs>0;
+ for(const control of document.querySelectorAll('#nickname,#add input,#add button,#items input,#items button,#replacePhoto'))control.disabled=busy;
+ el('items').setAttribute('aria-busy',String(busy));
+}
+syncControls();el('status').textContent='正在載入清單…';el('empty').hidden=true;
 const photoSources=new WeakMap();
 function readPhoto(photo){
  if(typeof photo==='string')return Promise.resolve(photo);
@@ -105,23 +113,33 @@ function read(db){
   req.onerror=()=>reject(req.error);
  });
 }
-async function update(change){
+function update(change){
+ ++pendingWrites;++refreshRequest;syncControls();el('status').textContent='正在儲存，請稍候…';
+ const work=writeQueue.then(()=>saveChange(change));
+ writeQueue=work.then(()=>undefined,()=>undefined);
+ return work.finally(()=>{--pendingWrites;syncControls();});
+}
+async function saveChange(change){
  try{
+  await initialized;
   const db=await database;
   const next=await new Promise((resolve,reject)=>{
    const tx=db.transaction('lists','readwrite'), store=tx.objectStore('lists'), req=store.get(0);
    let value;
-   req.onsuccess=()=>{value=req.result||structuredClone(defaultList);change(value);store.put(value);};
+   req.onsuccess=()=>{
+    try{value=req.result||structuredClone(defaultList);change(value);store.put(value);}
+    catch(error){reject(error);tx.abort();}
+   };
    tx.oncomplete=()=>resolve(value);
    tx.onabort=()=>reject(tx.error);
   });
-  list=next;el('status').textContent='已儲存';render();return true;
+  list=next;el('status').textContent=pendingWrites>1?'正在儲存，請稍候…':'已儲存，可以放心關閉';render();return true;
  }catch{el('status').textContent='儲存失敗，請確認瀏覽器允許儲存資料，或試試較小的照片。';return false;}
 }
 function render(){
  const {items}=list;
  el('count').textContent=items.filter(x=>x.done).length+' / '+items.length+' 已買';
- el('empty').hidden=items.length>0;
+ el('empty').hidden=!ready||items.length>0;
 
  el('items').replaceChildren(...items.map(item=>{
   const row=document.createElement('div');row.className='item';
@@ -140,12 +158,13 @@ function render(){
   del.onclick=()=>{if(confirm('刪除「'+item.name+'」？'))update(data=>{data.items=data.items.filter(x=>x.id!==item.id);});};
   row.append(photo,label,del);return row;
  }));
+ syncControls();
 }
 el('viewer').onclose=()=>{++viewerRequest;viewingId=null;el('viewer').querySelector('img').removeAttribute('src');};
 el('replacePhoto').onchange=async e=>{
  const input=e.target,file=input.files[0],id=viewingId;
  if(!file||!id)return;
- const request=viewerRequest;input.disabled=true;el('photoStatus').textContent='正在儲存照片…';
+ const request=viewerRequest;++photoJobs;syncControls();el('photoStatus').textContent='正在儲存照片…';
  try{
   const picture=await preparePhoto(file);
   const saved=await update(data=>{const item=data.items.find(x=>x.id===id);if(item)item.photo=picture;});
@@ -154,7 +173,7 @@ el('replacePhoto').onchange=async e=>{
    if(saved)el('viewer').querySelector('img').src=picture;
   }
  }catch{if(request===viewerRequest)el('photoStatus').textContent='這張照片無法讀取，請試試 JPG 或 PNG。';}
- finally{input.disabled=false;input.value='';}
+ finally{--photoJobs;syncControls();input.value='';}
 };
 let nameEdited=false;
 el('nickname').oninput=e=>{
@@ -164,19 +183,40 @@ el('nickname').oninput=e=>{
 };
 el('add').onsubmit=async e=>{
  e.preventDefault();
- if(adding)return;
+ if(!ready||adding||pendingWrites||photoJobs)return;
  const name=el('item').value.trim(),photo=el('photo').files[0],button=el('submit');
  if(!name)return;
- adding=true;button.disabled=true;
+ adding=true;++photoJobs;syncControls();el('status').textContent='正在處理照片，請稍候…';
  try{
   const picture=photo?await preparePhoto(photo):null;
   if(await update(list=>{list.items.unshift({id:crypto.randomUUID(),name,photo:picture,done:false});}))e.target.reset();
  }catch{el('status').textContent='這張照片無法讀取，請試試 JPG 或 PNG。';}
- finally{adding=false;button.disabled=false;}
+ finally{adding=false;--photoJobs;syncControls();}
 };
 render();
-database.then(read).then(saved=>{list=saved.find(entry=>entry.id===0)||list;if(!nameEdited)el('nickname').value=list.name==='清單 1'?'':list.name;render();}).catch(()=>{el('status').textContent='瀏覽器目前無法讀取已儲存的清單。';});
+const initialized=database.then(read).then(saved=>{
+ list=saved.find(entry=>entry.id===0)||list;
+ if(!nameEdited)el('nickname').value=list.name==='清單 1'?'':list.name;
+ ready=true;el('status').textContent='清單已載入';render();
+});
+initialized.catch(()=>{el('status').textContent='清單載入失敗，請重新整理；原有資料不會被空白清單覆蓋。';});
+async function refreshSavedList(){
+ if(!ready||photoJobs)return;
+ const request=++refreshRequest;
+ try{
+  await writeQueue;
+  const saved=await read(await database);
+  if(request!==refreshRequest||pendingWrites||photoJobs)return;
+  list=saved.find(entry=>entry.id===0)||list;render();
+ }catch{el('status').textContent='暫時無法重新讀取清單，請稍後再試。';}
+}
+window.addEventListener('pageshow',event=>{if(event.persisted)refreshSavedList();});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshSavedList();});
+window.addEventListener('beforeunload',event=>{
+ if(pendingWrites||photoJobs){event.preventDefault();event.returnValue='';}
+});
 </script></html>
+
 
 
 
